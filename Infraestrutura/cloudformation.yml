@@ -1,0 +1,226 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: CI/CD Pipeline DEV05
+
+Parameters:
+
+  RepoName:
+    Type: String
+  ArtifactBucket:
+    Type: String
+  AppName:
+    Type: String
+  InstanceName:
+    Type: String
+  BuildProjectName:
+    Type: String
+  AmiId:
+    Type: AWS::EC2::Image::Id
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+
+  InstanceType:
+    Type: String
+    Default: t2.micro
+    Description: Tipo de instância
+
+Resources:
+
+  FlaskRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryName: !Ref RepoName # Altere seu nome
+
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonEC2FullAccess
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforAWSCodeDeploy
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+      Path: /
+
+  FlaskEC2Instance:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !Ref AmiId # Amazon Linux 2023 sa-east-1 (Altere o AMI ID de acordo com a região)
+      IamInstanceProfile: !Ref InstanceProfile
+      KeyName: !Ref KeyName # Altere para o nome da sua Key Pair já criada (Verifique a região da chave criada)
+      Tags:
+        - Key: Name
+          Value: !Ref InstanceName # Altere para o seu nome
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y python3 git ruby wget
+          pip3 install flask
+          cd /home/ec2-user
+          wget https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
+          chmod +x ./install
+          ./install auto
+          service codedeploy-agent start
+
+  CodeDeployServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codedeploy.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodeDeployPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+
+  FlaskApplication:
+    Type: AWS::CodeDeploy::Application
+    Properties:
+      ApplicationName: !Ref AppName # Altere seu nome
+
+  FlaskDeploymentGroup:
+    Type: AWS::CodeDeploy::DeploymentGroup
+    Properties:
+      ApplicationName: !Ref FlaskApplication
+      DeploymentGroupName: flask-cicd-deployment-group
+      ServiceRoleArn: !GetAtt CodeDeployServiceRole.Arn
+      Ec2TagFilters:
+        - Key: Name
+          Value: !Ref InstanceName # Altere para o nome da sua instância exemplo <!Ref InstanceName>
+          Type: KEY_AND_VALUE
+      DeploymentConfigName: CodeDeployDefault.AllAtOnce
+      AutoRollbackConfiguration:
+        Enabled: true
+        Events:
+          - DEPLOYMENT_FAILURE
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codebuild.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+
+  FlaskBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref BuildProjectName # Altere seu nome
+      Source:
+        Type: CODEPIPELINE
+        Location: !GetAtt FlaskRepo.CloneUrlHttp
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:5.0
+        Type: LINUX_CONTAINER
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: codepipeline.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      Policies:
+        - PolicyName: CodePipelinePolicy # Altere seu nome
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: '*'
+                Resource: '*'
+
+  FlaskPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceAction
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: '1'
+              OutputArtifacts:
+                - Name: SourceOutput
+              Configuration:
+                RepositoryName: !Ref RepoName # Altere para o nome do seu Repositório exemplo: !Ref RepoName 
+                BranchName: main
+        - Name: Build
+          Actions:
+            - Name: BuildAction
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              InputArtifacts:
+                - Name: SourceOutput
+              OutputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ProjectName: !Ref FlaskBuildProject
+        - Name: Deploy
+          Actions:
+            - Name: DeployAction
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CodeDeploy
+                Version: '1'
+              InputArtifacts:
+                - Name: BuildOutput
+              Configuration:
+                ApplicationName: !Ref FlaskApplication
+                DeploymentGroupName: !Ref FlaskDeploymentGroup
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket # Altere para o nome do seu bucket de artefatos exemplo: seunome-cicd-bucket
+
+Outputs:
+  EC2InstanceId:
+    Description: ID da instância EC2
+    Value: !Ref FlaskEC2Instance
