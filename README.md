@@ -1,7 +1,5 @@
 # Projeto de Laboratório CI/CD com AWS
 
-**Data de geração:** 21/06/2025 04:34:49
-
 Este projeto implementa uma pipeline CI/CD completa utilizando os seguintes serviços da AWS:
 
 - AWS CodeCommit
